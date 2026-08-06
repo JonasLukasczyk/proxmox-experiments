@@ -444,6 +444,7 @@ set -euo pipefail
 
 ISO_DIR="/workspace/iso"
 OUTPUT_DIR="/workspace/output"
+TMP_DIR="/workspace/tmp"
 ANSWER_URL="${ANSWER_URL:-http://192.168.50.1/answer}"
 
 mapfile -t ISO_FILES < <(
@@ -472,24 +473,37 @@ echo
 echo "Output directory:"
 echo "  ${OUTPUT_DIR}"
 echo
+echo "Temporary directory:"
+echo "  ${TMP_DIR}"
+echo
 
-mkdir -p "${OUTPUT_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${TMP_DIR}"
 
-# Remove only previously generated PXE artifacts.
 find "${OUTPUT_DIR}" \
     -mindepth 1 \
     -maxdepth 1 \
     -exec rm -rf -- {} +
 
-proxmox-auto-install-assistant prepare-iso \
+find "${TMP_DIR}" \
+    -mindepth 1 \
+    -maxdepth 1 \
+    -exec rm -rf -- {} +
+
+if ! proxmox-auto-install-assistant prepare-iso \
     "${ISO_PATH}" \
     --fetch-from http \
     --url "${ANSWER_URL}" \
     --pxe-loader ipxe \
+    --tmp "${TMP_DIR}" \
     --output "${OUTPUT_DIR}"
+then
+    echo "Error: PXE artifact generation failed." >&2
+    exit 1
+fi
 
 echo
 echo "Generated PXE artifacts:"
+
 find "${OUTPUT_DIR}" \
     -maxdepth 2 \
     -type f \
@@ -498,7 +512,7 @@ find "${OUTPUT_DIR}" \
 EOF
 
 chmod +x builder/build.sh
-
+mkdir -p builder/tmp
 echo 'builder/tmp/' >> .gitignore
 
 sudo docker compose --profile build config
