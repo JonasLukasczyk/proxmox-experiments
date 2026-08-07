@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# Stop immediately on errors, unset variables, or failed pipeline commands.
 set -euo pipefail
 
 ###############################################################################
@@ -10,24 +9,33 @@ set -euo pipefail
 #   dnsmasq  - DHCP, PXE options and TFTP
 #   nginx    - Public HTTP endpoint and large static files
 #   Node.js  - Dynamic iPXE decisions and Proxmox answer files
-#
-# Network:
-#   Provisioning host: 192.168.50.1/24
-#   DHCP clients:       192.168.50.100-150
 ###############################################################################
 
 ###############################################################################
-# 1. Configuration
+# 1. Load configuration
 ###############################################################################
+
+if [[ ! -f .env ]]; then
+    echo "Error: .env does not exist." >&2
+    exit 1
+fi
 
 set -a
 source .env
 set +a
 
+: "${PROVISION_INTERFACE:?PROVISION_INTERFACE is not set}"
+: "${PROVISION_IP:?PROVISION_IP is not set}"
+: "${DHCP_START:?DHCP_START is not set}"
+: "${DHCP_END:?DHCP_END is not set}"
+
 LINK="${PROVISION_INTERFACE}"
 PROVISION_CIDR="${PROVISION_IP}/24"
 
-# Confirm that the selected interface exists before changing anything.
+###############################################################################
+# 2. Validate and configure provisioning interface
+###############################################################################
+
 if ! ip link show "${LINK}" >/dev/null 2>&1; then
     echo "Error: network interface '${LINK}' does not exist." >&2
     echo "Available interfaces:" >&2
@@ -35,35 +43,30 @@ if ! ip link show "${LINK}" >/dev/null 2>&1; then
     exit 1
 fi
 
-###############################################################################
-# 2. Configure the dedicated provisioning interface
-###############################################################################
+echo "Configuring provisioning interface '${LINK}'..."
 
-# Bring the interface up and assign the provisioning address.
-#
-# The address is temporary and will disappear after reboot. It can later be
-# made persistent with NetworkManager, systemd-networkd or another host network
-# configuration system.
 sudo ip link set "${LINK}" up
 sudo ip addr flush dev "${LINK}"
 sudo ip addr add "${PROVISION_CIDR}" dev "${LINK}"
 
+echo
 echo "Provisioning interface:"
 ip -br addr show "${LINK}"
 
-# A working cable and powered target should cause LOWER_UP to appear.
 echo
 echo "Physical-link status:"
-sudo ethtool "${LINK}" | grep -E 'Speed:|Duplex:|Link detected:' || true
+sudo ethtool "${LINK}" \
+    | grep -E 'Speed:|Duplex:|Link detected:' \
+    || true
 
 ###############################################################################
-# 3. Create the project directories
+# 3. Create required directories
 ###############################################################################
 
 mkdir -p \
-    builder \
     builder/tmp \
     config/dnsmasq \
+    config/ipxe \
     config/nginx \
     app/src \
     data/dnsmasq \
@@ -74,13 +77,17 @@ mkdir -p \
     data/http/static \
     data/http/answers
 
-
-# dnsmasq writes leases into this bind-mounted directory.
 touch data/dnsmasq/dnsmasq.leases
 
+if [[ ! -f data/inventory/hosts.json ]]; then
+    echo '{}' > data/inventory/hosts.json
+fi
+
 ###############################################################################
-# 9. Configure DHCP, TFTP and PXE
+# 4. Generate dnsmasq configuration
 ###############################################################################
+
+echo "Generating dnsmasq configuration..."
 
 envsubst \
     '${PROVISION_INTERFACE} ${DHCP_START} ${DHCP_END}' \
@@ -88,70 +95,108 @@ envsubst \
     > config/dnsmasq/dnsmasq.conf
 
 ###############################################################################
-# 10. Download the UEFI iPXE loader
+# 5. Download iPXE UEFI loader
 ###############################################################################
 
-curl --fail --location \
-    https://boot.ipxe.org/x86_64-efi/ipxe.efi \
-    --output data/tftp/ipxe.efi
+IPXE_FILE="data/tftp/ipxe.efi"
+IPXE_URL="https://boot.ipxe.org/x86_64-efi/ipxe.efi"
 
-# Confirm that the downloaded file is an EFI executable.
-file data/tftp/ipxe.efi
+if [[ ! -f "${IPXE_FILE}" ]]; then
+    echo "Downloading iPXE UEFI loader..."
+
+    curl --fail --location \
+        "${IPXE_URL}" \
+        --output "${IPXE_FILE}.tmp"
+
+    mv "${IPXE_FILE}.tmp" "${IPXE_FILE}"
+else
+    echo "iPXE loader already exists: ${IPXE_FILE}"
+fi
+
+echo
+echo "iPXE loader:"
+file "${IPXE_FILE}"
 
 ###############################################################################
-# 11. Create the iPXE bootstrap script
+# 6. Generate iPXE bootstrap script
 ###############################################################################
+
+echo
+echo "Generating iPXE bootstrap script..."
+
 sed \
     "s|@PROVISION_IP@|${PROVISION_IP}|g" \
     config/ipxe/autoexec.ipxe.template \
     > data/tftp/autoexec.ipxe
 
-# step download iso
-ISO_FILE="proxmox-ve_9.2-1.iso"
-ISO_DIR="./data/iso"
-ISO_URL="http://download.proxmox.com/iso/${ISO_FILE}"
+###############################################################################
+# 7. Download Proxmox ISO
+###############################################################################
 
-if [[ ! -f "${ISO_DIR}/${ISO_FILE}" ]]; then
+ISO_FILE="proxmox-ve_9.2-1.iso"
+ISO_DIR="data/iso"
+ISO_URL="http://download.proxmox.com/iso/${ISO_FILE}"
+ISO_PATH="${ISO_DIR}/${ISO_FILE}"
+
+if [[ ! -f "${ISO_PATH}" ]]; then
+    echo
     echo "Downloading Proxmox ISO..."
+
     curl --fail --location \
         "${ISO_URL}" \
-        --output "${ISO_DIR}/${ISO_FILE}"
+        --output "${ISO_PATH}.tmp"
+
+    mv "${ISO_PATH}.tmp" "${ISO_PATH}"
 else
-    echo "Proxmox ISO already exists: ${ISO_DIR}/${ISO_FILE}"
+    echo
+    echo "Proxmox ISO already exists: ${ISO_PATH}"
 fi
 
-
-
 ###############################################################################
-# 14. Validate the generated configuration
+# 8. Validate Docker Compose configuration
 ###############################################################################
 
 echo
 echo "Validating Docker Compose configuration..."
-sudo docker compose config >/dev/null
+
+sudo docker compose --profile build config >/dev/null
 
 echo "Compose configuration is valid."
 
-mkdir -p builder/tmp
+###############################################################################
+# 9. Stop existing stack
+###############################################################################
 
+echo
 echo "Stopping existing provisioning stack..."
-sudo docker compose down --remove-orphans
-sudo docker rm -f \
-    proxmox-dnsmasq \
-    proxmox-nginx \
-    proxmox-api \
-    proxmox-builder \
-    2>/dev/null || true
 
-echo "Building PXE artifacts..."
+sudo docker compose down --remove-orphans || true
+
+###############################################################################
+# 10. Build PXE artifacts
+###############################################################################
+
+echo
+echo "Building PXE artifact builder..."
+
 sudo docker compose --profile build build builder
+
+echo
+echo "Generating PXE artifacts..."
+
 sudo docker compose --profile build run --rm builder
 
+###############################################################################
+# 11. Start provisioning services
+###############################################################################
+
+echo
 echo "Starting provisioning stack..."
+
 sudo docker compose up --detach --build
 
 ###############################################################################
-# 16. Verify the services
+# 12. Verify services
 ###############################################################################
 
 echo
@@ -171,68 +216,97 @@ echo "nginx startup log:"
 sudo docker compose logs --tail=30 nginx
 
 ###############################################################################
-# 17. Verify HTTP routing
+# 13. Wait for HTTP service
 ###############################################################################
 
+echo
 echo "Waiting for provisioning server..."
 
-for i in {1..30}; do
-    if curl --silent --fail http://192.168.50.1/health >/dev/null; then
-        echo "Provisioning server is ready."
+ready=false
+
+for _ in {1..30}; do
+    if curl --silent --fail \
+        "http://${PROVISION_IP}/health" \
+        >/dev/null
+    then
+        ready=true
         break
     fi
 
     sleep 1
 done
 
+if [[ "${ready}" != true ]]; then
+    echo "Error: provisioning server did not become ready." >&2
+    echo
+    echo "nginx logs:"
+    sudo docker compose logs --tail=100 nginx || true
+    echo
+    echo "API logs:"
+    sudo docker compose logs --tail=100 api || true
+    exit 1
+fi
+
+echo "Provisioning server is ready."
+
+###############################################################################
+# 14. Verify HTTP routing
+###############################################################################
+
 echo
 echo "Checking API health through nginx..."
-curl --fail --show-error http://192.168.50.1/health
-echo
+
+curl --fail --show-error \
+    "http://${PROVISION_IP}/health"
 
 echo
-echo "Checking nginx landing page..."
-curl --fail --show-error http://192.168.50.1/
-echo
-
 echo
 echo "Checking dynamic iPXE response..."
+
 curl --fail --show-error \
-    'http://192.168.50.1/ipxe/boot?mac=c4:d6:d3:64:61:3e'
+    "http://${PROVISION_IP}/ipxe/boot?mac=c4:d6:d3:64:61:3e"
+
 echo
 
 ###############################################################################
-# 18. Verify bind mounts
+# 15. Verify bind mounts
 ###############################################################################
 
 echo
 echo "TFTP files visible inside dnsmasq:"
-sudo docker exec proxmox-dnsmasq ls -lh /srv/tftp
+
+sudo docker compose exec dnsmasq \
+    ls -lh /srv/tftp
 
 echo
 echo "HTTP files visible inside nginx:"
-sudo docker exec proxmox-nginx find /usr/share/nginx/html \
-    -maxdepth 3 -type f -print
+
+sudo docker compose exec nginx \
+    find /usr/share/nginx/html \
+        -maxdepth 3 \
+        -type f \
+        -print
 
 ###############################################################################
-# 19. Final status
+# 16. Final status
 ###############################################################################
 
 cat <<EOF
+
 Provisioning stack is ready.
 
 Provisioning interface: ${LINK}
-Provisioning address:   http://${PROVISION_IP}/
+Provisioning IP:        ${PROVISION_IP}
 API health check:       http://${PROVISION_IP}/health
 Dynamic iPXE endpoint:  http://${PROVISION_IP}/ipxe/boot?mac=<MAC>
 
 Next PXE boot flow:
 
-  Dell UEFI
+  UEFI PXE
     -> dnsmasq DHCP
     -> ipxe.efi over TFTP
     -> autoexec.ipxe over TFTP
     -> nginx on port 80
     -> Node.js /ipxe/boot endpoint
-EOF
 
+EOF

@@ -2,7 +2,6 @@ services:
   builder:
     build:
       context: ./builder
-    container_name: proxmox-builder
     profiles:
       - build
     environment:
@@ -15,7 +14,6 @@ services:
   api:
     build:
       context: ./app
-    container_name: proxmox-api
     restart: unless-stopped
 
     # Port 3000 is visible only to containers on the Compose network.
@@ -32,7 +30,6 @@ services:
 
   nginx:
     image: nginx:1.29-alpine
-    container_name: proxmox-nginx
     restart: unless-stopped
 
     depends_on:
@@ -50,7 +47,6 @@ services:
   dnsmasq:
     build:
       context: ./config/dnsmasq
-    container_name: proxmox-dnsmasq
     restart: unless-stopped
 
     # DHCP broadcasts and the physical host interface require host networking.
