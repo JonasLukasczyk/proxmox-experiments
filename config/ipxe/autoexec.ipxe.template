@@ -1,0 +1,15 @@
+#!ipxe
+
+echo Contacting smart PXE server...
+
+# The firmware DHCP lease does not always carry cleanly into iPXE, so request
+# network configuration again before contacting the HTTP server.
+dhcp || goto failed
+
+# nginx receives this request on port 80 and proxies it to the Node.js API.
+chain http://@PROVISION_IP@/ipxe/boot?mac=${net0/mac} || goto failed
+
+:failed
+echo Dynamic PXE request failed
+echo iPXE error: ${errno}
+shell

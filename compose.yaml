@@ -1,0 +1,64 @@
+services:
+  builder:
+    build:
+      context: ./builder
+    container_name: proxmox-builder
+    profiles:
+      - build
+    volumes:
+      - ./data/iso:/workspace/iso:ro
+      - ./builder:/workspace/builder:ro
+      - ./builder/tmp:/workspace/tmp
+      - ./data/http/proxmox:/workspace/output
+  api:
+    build:
+      context: ./app
+    container_name: proxmox-api
+    restart: unless-stopped
+
+    # Port 3000 is visible only to containers on the Compose network.
+    expose:
+      - "3000"
+
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      INVENTORY_PATH: "/data/inventory/hosts.json"
+
+    volumes:
+      - ./data/inventory:/data/inventory
+
+  nginx:
+    image: nginx:1.29-alpine
+    container_name: proxmox-nginx
+    restart: unless-stopped
+
+    depends_on:
+      - api
+
+    # nginx is the only public HTTP server.
+    # Binding to PROVISION_IP prevents exposure on the office-facing NIC.
+    ports:
+      - "${PROVISION_IP}:80:80"
+
+    volumes:
+      - ./config/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data/http:/usr/share/nginx/html:ro
+
+  dnsmasq:
+    build:
+      context: ./config/dnsmasq
+    container_name: proxmox-dnsmasq
+    restart: unless-stopped
+
+    # DHCP broadcasts and the physical host interface require host networking.
+    network_mode: host
+
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    volumes:
+      - ./config/dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf:ro
+      - ./data/tftp:/srv/tftp:ro
+      - ./data/dnsmasq:/var/lib/misc

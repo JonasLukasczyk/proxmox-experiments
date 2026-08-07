@@ -1,0 +1,26 @@
+# Listen only on the dedicated provisioning interface.
+interface=${PROVISION_INTERFACE}
+bind-interfaces
+
+# Disable dnsmasq's DNS server. Only DHCP and TFTP are needed.
+port=0
+
+# Address pool for PXE clients.
+dhcp-range=${DHCP_START},${DHCP_END},255.255.255.0,1h
+
+# Do not advertise a default gateway on this isolated provisioning network.
+dhcp-option=option:router
+
+# DHCP diagnostics are written to the container log.
+log-dhcp
+log-facility=-
+
+# Persistent lease database.
+dhcp-leasefile=/var/lib/misc/dnsmasq.leases
+
+# Serve the initial iPXE loader over TFTP.
+enable-tftp
+tftp-root=/srv/tftp
+
+# UEFI x86-64 network boot program.
+dhcp-boot=ipxe.efi
