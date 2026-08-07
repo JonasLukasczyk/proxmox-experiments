@@ -5,6 +5,8 @@ services:
     container_name: proxmox-builder
     profiles:
       - build
+    environment:
+      ANSWER_URL: "http://${PROVISION_IP}/answer"
     volumes:
       - ./data/iso:/workspace/iso:ro
       - ./builder:/workspace/builder:ro
