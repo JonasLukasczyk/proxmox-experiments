@@ -7,7 +7,6 @@ set -euo pipefail
 #
 # Services:
 #   dnsmasq  - DHCP, PXE options and TFTP
-#   nginx    - Public HTTP endpoint and large static files
 #   Node.js  - Dynamic iPXE decisions and Proxmox answer files
 ###############################################################################
 
@@ -67,7 +66,6 @@ mkdir -p \
     builder/tmp \
     config/dnsmasq \
     config/ipxe \
-    config/nginx \
     app/src \
     data/dnsmasq \
     data/inventory \
@@ -167,33 +165,17 @@ echo "Compose configuration is valid."
 # 9. Stop existing stack
 ###############################################################################
 
-echo
-echo "Stopping existing provisioning stack..."
-
-sudo docker compose down --remove-orphans || true
+# echo
+# echo "Stopping existing provisioning stack..."
+#
+# sudo docker compose down --remove-orphans || true
 
 ###############################################################################
 # 10. Build PXE artifacts
 ###############################################################################
 
-echo
-echo "Building PXE artifact builder..."
-
-sudo docker compose --profile build build builder
-
-echo
-echo "Generating PXE artifacts..."
-
-sudo docker compose --profile build run --rm builder
-
-###############################################################################
-# 11. Start provisioning services
-###############################################################################
-
-echo
-echo "Starting provisioning stack..."
-
-sudo docker compose up --detach --build
+sudo docker compose --profile build run --rm --build builder
+sudo docker compose up -d --build
 
 ###############################################################################
 # 12. Verify services
@@ -210,10 +192,6 @@ sudo docker compose logs --tail=30 dnsmasq
 echo
 echo "Node.js API startup log:"
 sudo docker compose logs --tail=30 api
-
-echo
-echo "nginx startup log:"
-sudo docker compose logs --tail=30 nginx
 
 ###############################################################################
 # 13. Wait for HTTP service
@@ -238,10 +216,6 @@ done
 
 if [[ "${ready}" != true ]]; then
     echo "Error: provisioning server did not become ready." >&2
-    echo
-    echo "nginx logs:"
-    sudo docker compose logs --tail=100 nginx || true
-    echo
     echo "API logs:"
     sudo docker compose logs --tail=100 api || true
     exit 1
@@ -254,7 +228,7 @@ echo "Provisioning server is ready."
 ###############################################################################
 
 echo
-echo "Checking API health through nginx..."
+echo "Checking API health ..."
 
 curl --fail --show-error \
     "http://${PROVISION_IP}/health"
@@ -278,15 +252,6 @@ echo "TFTP files visible inside dnsmasq:"
 sudo docker compose exec dnsmasq \
     ls -lh /srv/tftp
 
-echo
-echo "HTTP files visible inside nginx:"
-
-sudo docker compose exec nginx \
-    find /usr/share/nginx/html \
-        -maxdepth 3 \
-        -type f \
-        -print
-
 ###############################################################################
 # 16. Final status
 ###############################################################################
@@ -306,7 +271,6 @@ Next PXE boot flow:
     -> dnsmasq DHCP
     -> ipxe.efi over TFTP
     -> autoexec.ipxe over TFTP
-    -> nginx on port 80
     -> Node.js /ipxe/boot endpoint
 
 EOF

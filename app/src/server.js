@@ -1,5 +1,22 @@
 import Fastify from "fastify";
+import fastifyStatic from "@fastify/static";
 import { readFile, rename, writeFile } from "node:fs/promises";
+
+const app = Fastify({
+  logger: true
+});
+
+const inventoryPath =
+  process.env.INVENTORY_PATH ?? "/data/inventory/hosts.json";
+
+const proxmoxPath =
+  process.env.PROXMOX_PATH ?? "/data/http/proxmox";
+
+const provisionIp =
+  process.env.PROVISION_IP ?? "192.168.50.1";
+
+const port = Number(process.env.PORT ?? 80);
+const host = process.env.HOST ?? "0.0.0.0";
 
 async function readInventory() {
   try {
@@ -23,24 +40,31 @@ async function writeInventory(inventory) {
   await rename(temporaryPath, inventoryPath);
 }
 
-function hostnameFromMac(mac) {
-  const suffix = mac.replaceAll(":", "").slice(-6);
-  return `pve-${suffix}`;
-}
-
-const app = Fastify({
-  logger: true
-});
-
-const inventoryPath =
-  process.env.INVENTORY_PATH ?? "/data/inventory/hosts.json";
-
 function normalizeMac(value) {
   return String(value ?? "")
     .trim()
     .toLowerCase()
     .replaceAll("-", ":");
 }
+
+function hostnameFromMac(mac) {
+  const suffix = mac.replaceAll(":", "").slice(-6);
+  return `pve-${suffix}`;
+}
+
+/*
+ * Serve the generated Proxmox PXE artifacts directly from Node.js.
+ *
+ * Examples:
+ *   /proxmox/boot.ipxe
+ *   /proxmox/vmlinuz
+ *   /proxmox/initrd.img
+ */
+await app.register(fastifyStatic, {
+  root: proxmoxPath,
+  prefix: "/proxmox/",
+  decorateReply: false
+});
 
 app.get("/health", async () => {
   return {
@@ -96,63 +120,64 @@ exit
 
   const inventory = await readInventory();
 
-  let host = inventory[mac];
+  let hostEntry = inventory[mac];
 
-  if (!host) {
-    host = {
+  if (!hostEntry) {
+    hostEntry = {
       hostname: hostnameFromMac(mac),
       action: "install",
       discoveredAt: new Date().toISOString(),
       status: "discovered"
     };
 
-    inventory[mac] = host;
+    inventory[mac] = hostEntry;
     await writeInventory(inventory);
 
     app.log.info(
       {
         mac,
-        hostname: host.hostname
+        hostname: hostEntry.hostname
       },
       "Automatically registered new PXE client"
     );
   }
 
-  if (host.action === "local") {
+  if (hostEntry.action === "local") {
     return `#!ipxe
-echo Hostname : ${host.hostname}
+echo Hostname : ${hostEntry.hostname}
 echo Action   : local boot
 sleep 2
 exit
 `;
   }
 
-if (host.action === "install") {
-  return `#!ipxe
+  if (hostEntry.action === "install") {
+    return `#!ipxe
 echo Proxmox installation authorized
-echo Hostname: ${host.hostname}
+echo Hostname: ${hostEntry.hostname}
 echo MAC: ${mac}
-chain http://192.168.50.1/proxmox/boot.ipxe || goto failed
+
+chain http://${provisionIp}/proxmox/boot.ipxe || goto failed
 
 :failed
 echo Failed to load Proxmox installer
 echo Error: \${errno}
 shell
 `;
-}
+  }
 
   return `#!ipxe
-echo Unsupported action: ${host.action}
+echo Unsupported action: ${hostEntry.action}
 sleep 5
 exit
 `;
 });
 
-const port = Number(process.env.PORT ?? 3000);
-const host = process.env.HOST ?? "0.0.0.0";
-
 try {
-  await app.listen({ port, host });
+  await app.listen({
+    port,
+    host
+  });
 } catch (error) {
   app.log.error(error);
   process.exit(1);
