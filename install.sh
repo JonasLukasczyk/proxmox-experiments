@@ -63,17 +63,15 @@ sudo ethtool "${LINK}" \
 ###############################################################################
 
 mkdir -p \
-    builder/tmp \
-    config/dnsmasq \
-    config/ipxe \
-    app/src \
     data/dnsmasq \
     data/inventory \
-    data/tftp \
     data/iso \
-    data/http/proxmox \
-    data/http/static \
-    data/http/answers
+    data/proxmox \
+    data/tftp
+
+if [[ ! -f data/inventory/hosts.json ]]; then
+    echo '{}' > data/inventory/hosts.json
+fi
 
 touch data/dnsmasq/dnsmasq.leases
 
