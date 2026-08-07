@@ -515,15 +515,14 @@ chmod +x builder/build.sh
 mkdir -p builder/tmp
 echo 'builder/tmp/' >> .gitignore
 
-sudo docker compose --profile build config
+echo "Stopping existing provisioning stack..."
+sudo docker compose down --remove-orphans
+
+echo "Building PXE artifacts..."
 sudo docker compose --profile build build builder
 sudo docker compose --profile build run --rm builder
 
-###############################################################################
-# 15. Build and start the stack
-###############################################################################
-
-sudo docker compose down --remove-orphans
+echo "Starting provisioning stack..."
 sudo docker compose up --detach --build
 
 ###############################################################################
