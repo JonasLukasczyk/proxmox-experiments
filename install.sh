@@ -532,6 +532,12 @@ echo 'builder/tmp/' >> .gitignore
 
 echo "Stopping existing provisioning stack..."
 sudo docker compose down --remove-orphans
+sudo docker rm -f \
+    proxmox-dnsmasq \
+    proxmox-nginx \
+    proxmox-api \
+    proxmox-builder \
+    2>/dev/null || true
 
 echo "Building PXE artifacts..."
 sudo docker compose --profile build build builder
@@ -625,13 +631,4 @@ Next PXE boot flow:
     -> nginx on port 80
     -> Node.js /ipxe/boot endpoint
 EOF
-
-
-###############################################################################
-
-
-# download iso
-curl -LO http://download.proxmox.com/iso/proxmox-ve_9.2-1.iso
-mv proxmox-ve_9.2-1.iso ./data/iso/
-
 
