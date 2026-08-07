@@ -517,6 +517,7 @@ echo 'builder/tmp/' >> .gitignore
 
 sudo docker compose --profile build config
 sudo docker compose --profile build build builder
+sudo docker compose --profile build run --rm builder
 
 ###############################################################################
 # 15. Build and start the stack
