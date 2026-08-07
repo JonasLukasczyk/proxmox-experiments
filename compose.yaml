@@ -6,6 +6,7 @@ services:
       - build
     environment:
       ANSWER_URL: "http://${PROVISION_IP}/answer"
+      PROVISION_IP: "${PROVISION_IP}"
     volumes:
       - ./data/iso:/workspace/iso:ro
       - ./builder:/workspace/builder:ro

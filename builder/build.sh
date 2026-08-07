@@ -49,11 +49,24 @@ find "${TMP_DIR}" \
     -maxdepth 1 \
     -exec rm -rf -- {} +
 
+FIRST_BOOT_SOURCE="/workspace/builder/first-boot.sh"
+FIRST_BOOT_RENDERED="${TMP_DIR}/first-boot.sh"
+
+: "${PROVISION_IP:?PROVISION_IP must be set}"
+
+sed \
+    "s|@PROVISION_IP@|${PROVISION_IP}|g" \
+    "${FIRST_BOOT_SOURCE}" \
+    > "${FIRST_BOOT_RENDERED}"
+
+chmod +x "${FIRST_BOOT_RENDERED}"
+
 if ! proxmox-auto-install-assistant prepare-iso \
     "${ISO_PATH}" \
     --fetch-from http \
     --url "${ANSWER_URL}" \
     --pxe-loader ipxe \
+    --on-first-boot "${FIRST_BOOT_RENDERED}" \
     --tmp "${TMP_DIR}" \
     --output "${OUTPUT_DIR}"
 then

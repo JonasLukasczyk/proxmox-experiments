@@ -163,10 +163,10 @@ echo "Compose configuration is valid."
 # 9. Stop existing stack
 ###############################################################################
 
-# echo
-# echo "Stopping existing provisioning stack..."
-#
-# sudo docker compose down --remove-orphans || true
+echo
+echo "Stopping existing provisioning stack..."
+
+sudo docker compose down --remove-orphans || true
 
 ###############################################################################
 # 10. Build PXE artifacts
@@ -236,7 +236,7 @@ echo
 echo "Checking dynamic iPXE response..."
 
 curl --fail --show-error \
-    "http://${PROVISION_IP}/ipxe/boot?mac=c4:d6:d3:64:61:3e"
+    "http://${PROVISION_IP}/ipxe/boot?mac=00:00:00:00:00:00"
 
 echo
 

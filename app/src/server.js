@@ -10,13 +10,15 @@ const inventoryPath =
   process.env.INVENTORY_PATH ?? "/data/inventory/hosts.json";
 
 const proxmoxPath =
-  process.env.PROXMOX_PATH ?? "/data/http/proxmox";
+  process.env.PROXMOX_PATH ?? "/data/proxmox";
 
 const provisionIp =
   process.env.PROVISION_IP ?? "192.168.50.1";
 
 const port = Number(process.env.PORT ?? 80);
 const host = process.env.HOST ?? "0.0.0.0";
+
+const macPattern = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;
 
 async function readInventory() {
   try {
@@ -35,7 +37,7 @@ async function writeInventory(inventory) {
   const temporaryPath = `${inventoryPath}.tmp`;
   const content = `${JSON.stringify(inventory, null, 2)}\n`;
 
-  // Write and rename so readers never see a partially written JSON file.
+  // Write and rename so readers never see partially written JSON.
   await writeFile(temporaryPath, content, "utf8");
   await rename(temporaryPath, inventoryPath);
 }
@@ -47,13 +49,32 @@ function normalizeMac(value) {
     .replaceAll("-", ":");
 }
 
+function isValidMac(mac) {
+  return macPattern.test(mac);
+}
+
 function hostnameFromMac(mac) {
   const suffix = mac.replaceAll(":", "").slice(-6);
   return `pve-${suffix}`;
 }
 
+function installerScript(hostEntry, mac) {
+  return `#!ipxe
+echo Starting Proxmox installation
+echo Hostname: ${hostEntry.hostname}
+echo MAC: ${mac}
+
+chain http://${provisionIp}/proxmox/boot.ipxe || goto failed
+
+:failed
+echo Failed to load Proxmox installer
+echo Error: \${errno}
+shell
+`;
+}
+
 /*
- * Serve the generated Proxmox PXE artifacts directly from Node.js.
+ * Serve generated Proxmox PXE artifacts.
  *
  * Examples:
  *   /proxmox/boot.ipxe
@@ -66,12 +87,18 @@ await app.register(fastifyStatic, {
   decorateReply: false
 });
 
+/*
+ * Health check.
+ */
 app.get("/health", async () => {
   return {
     status: "ok"
   };
 });
 
+/*
+ * Proxmox automated installer answer file.
+ */
 app.post("/answer", async (request, reply) => {
   app.log.info(
     {
@@ -88,7 +115,7 @@ country = "de"
 fqdn = "pve01.example.internal"
 mailto = "admin@example.internal"
 timezone = "Europe/Berlin"
-root-password = "REPLACE_WITH_A_TEMPORARY_PASSWORD"
+root-password = "rootroot"
 reboot-on-error = false
 
 [network]
@@ -97,18 +124,85 @@ source = "from-dhcp"
 [disk-setup]
 filesystem = "ext4"
 disk-list = ["nvme0n1"]
+
+[first-boot]
+source = "from-iso"
+ordering = "fully-up"
 `;
 
   reply.type("text/plain; charset=utf-8");
   return answer.trimStart();
 });
 
+/*
+ * Start an installation.
+ *
+ * Both cases end up here:
+ *
+ *   1. action=install
+ *      -> explicitly requested reinstall
+ *
+ *   2. action=local
+ *      -> local boot failed
+ *      -> fall back to installation
+ *
+ * Before booting the installer, action is reset to "local".
+ * This prevents the machine from reinstalling again after the installer
+ * reboots.
+ */
+app.get("/ipxe/install", async (request, reply) => {
+  const mac = normalizeMac(request.query.mac);
+
+  reply.type("text/plain; charset=utf-8");
+
+  if (!isValidMac(mac)) {
+    reply.code(400);
+
+    return `#!ipxe
+echo Invalid MAC address
+shell
+`;
+  }
+
+  const inventory = await readInventory();
+  const hostEntry = inventory[mac];
+
+  if (!hostEntry) {
+    reply.code(404);
+
+    return `#!ipxe
+echo Unknown host
+shell
+`;
+  }
+
+  hostEntry.action = "local";
+  hostEntry.status = "installing";
+  hostEntry.installStartedAt = new Date().toISOString();
+
+  inventory[mac] = hostEntry;
+  await writeInventory(inventory);
+
+  app.log.info(
+    {
+      mac,
+      hostname: hostEntry.hostname
+    },
+    "Starting Proxmox installation"
+  );
+
+  return installerScript(hostEntry, mac);
+});
+
+/*
+ * Main PXE decision endpoint.
+ */
 app.get("/ipxe/boot", async (request, reply) => {
   const mac = normalizeMac(request.query.mac);
 
   reply.type("text/plain; charset=utf-8");
 
-  if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(mac)) {
+  if (!isValidMac(mac)) {
     reply.code(400);
 
     return `#!ipxe
@@ -122,12 +216,22 @@ exit
 
   let hostEntry = inventory[mac];
 
+  /*
+   * Unknown machines are discovered conservatively.
+   *
+   * action=local means:
+   *   try local boot first,
+   *   then install if local boot fails.
+   *
+   * This prevents an existing Proxmox installation from being wiped merely
+   * because hosts.json was reset.
+   */
   if (!hostEntry) {
     hostEntry = {
       hostname: hostnameFromMac(mac),
-      action: "install",
-      discoveredAt: new Date().toISOString(),
-      status: "discovered"
+      action: "local",
+      status: "discovered",
+      discoveredAt: new Date().toISOString()
     };
 
     inventory[mac] = hostEntry;
@@ -142,25 +246,54 @@ exit
     );
   }
 
-  if (hostEntry.action === "local") {
+  /*
+   * Explicit installation request.
+   *
+   * Do not attempt local boot first.
+   */
+  if (hostEntry.action === "install") {
     return `#!ipxe
 echo Hostname : ${hostEntry.hostname}
-echo Action   : local boot
-sleep 2
-exit
+echo MAC      : ${mac}
+echo Action   : forced installation
+
+chain http://${provisionIp}/ipxe/install?mac=${mac} || goto failed
+
+:failed
+echo Failed to start Proxmox installer
+echo Error: \${errno}
+shell
 `;
   }
 
-  if (hostEntry.action === "install") {
+  /*
+   * "local" means:
+   *
+   *   1. Try to boot the local disk.
+   *   2. If local boot fails, fall back to installation.
+   *
+   * If sanboot succeeds, execution never reaches :install because control
+   * transfers to the locally installed operating system.
+   */
+  if (hostEntry.action === "local") {
     return `#!ipxe
-echo Proxmox installation authorized
-echo Hostname: ${hostEntry.hostname}
-echo MAC: ${mac}
+echo Hostname : ${hostEntry.hostname}
+echo MAC      : ${mac}
+echo Status   : ${hostEntry.status}
+echo Action   : prefer local boot
 
-chain http://${provisionIp}/proxmox/boot.ipxe || goto failed
+echo Trying local boot...
+
+sanboot --no-describe --drive 0x80 || goto install
+
+:install
+echo Local boot failed
+echo Falling back to Proxmox installation...
+
+chain http://${provisionIp}/ipxe/install?mac=${mac} || goto failed
 
 :failed
-echo Failed to load Proxmox installer
+echo Failed to start Proxmox installer
 echo Error: \${errno}
 shell
 `;
@@ -168,9 +301,52 @@ shell
 
   return `#!ipxe
 echo Unsupported action: ${hostEntry.action}
-sleep 5
-exit
+shell
 `;
+});
+
+/*
+ * Called by the installed Proxmox system after it has successfully booted.
+ *
+ * This confirms that the installation is usable, rather than merely that the
+ * installer started successfully.
+ */
+app.post("/confirmInstalled", async (request, reply) => {
+  const mac = normalizeMac(request.query.mac);
+
+  if (!isValidMac(mac)) {
+    return reply.code(400).send({
+      error: "Invalid MAC address"
+    });
+  }
+
+  const inventory = await readInventory();
+  const hostEntry = inventory[mac];
+
+  if (!hostEntry) {
+    return reply.code(404).send({
+      error: "Unknown host"
+    });
+  }
+
+  hostEntry.action = "local";
+  hostEntry.status = "installed";
+  hostEntry.installedAt = new Date().toISOString();
+
+  inventory[mac] = hostEntry;
+  await writeInventory(inventory);
+
+  app.log.info(
+    {
+      mac,
+      hostname: hostEntry.hostname
+    },
+    "Proxmox installation confirmed"
+  );
+
+  return {
+    status: "ok"
+  };
 });
 
 try {
