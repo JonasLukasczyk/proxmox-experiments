@@ -340,7 +340,7 @@ services:
       INVENTORY_PATH: "/data/inventory/hosts.json"
 
     volumes:
-      - ./data/inventory:/data/inventory:ro
+      - ./data/inventory:/data/inventory
 
   nginx:
     image: nginx:1.29-alpine
