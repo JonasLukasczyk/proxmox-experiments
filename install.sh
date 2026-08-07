@@ -71,6 +71,7 @@ mkdir -p \
     data/dnsmasq \
     data/inventory \
     data/tftp \
+    data/iso \
     data/http/proxmox \
     data/http/static \
     data/http/answers
@@ -267,6 +268,20 @@ echo Dynamic PXE request failed
 echo iPXE error: ${errno}
 shell
 EOF
+
+# step iso
+ISO_FILE="proxmox-ve_9.2-1.iso"
+ISO_DIR="./data/iso"
+ISO_URL="http://download.proxmox.com/iso/${ISO_FILE}"
+
+if [[ ! -f "${ISO_DIR}/${ISO_FILE}" ]]; then
+    echo "Downloading Proxmox ISO..."
+    curl --fail --location \
+        "${ISO_URL}" \
+        --output "${ISO_DIR}/${ISO_FILE}"
+else
+    echo "Proxmox ISO already exists: ${ISO_DIR}/${ISO_FILE}"
+fi
 
 ###############################################################################
 # 12. Create the Node.js container image
